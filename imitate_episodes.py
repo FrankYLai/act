@@ -4,6 +4,7 @@ import os
 import pickle
 import argparse
 import matplotlib.pyplot as plt
+from leapp import annotate
 from copy import deepcopy
 from tqdm import tqdm
 from einops import rearrange
@@ -141,15 +142,19 @@ def make_optimizer(policy_class, policy):
 def get_image(ts, camera_names):
     curr_images = []
     for cam_name in camera_names:
-        curr_image = rearrange(ts.observation['images'][cam_name], 'h w c -> c h w')
+        curr_image = annotate.input_tensors(
+            'act_policy',
+            {f'pixels_{cam_name}': ts.observation['images'][cam_name].copy()},
+        )
+        curr_image = rearrange(curr_image, 'h w c -> c h w')
         curr_images.append(curr_image)
     curr_image = np.stack(curr_images, axis=0)
     curr_image = torch.from_numpy(curr_image / 255.0).float().cuda().unsqueeze(0)
     return curr_image
 
 
-def eval_bc(config, ckpt_name, save_episode=True):
-    set_seed(1000)
+def eval_bc(config, ckpt_name, save_episode=True, inference_manager=None):
+    set_seed(config.get('eval_seed', 1000))
     ckpt_dir = config['ckpt_dir']
     state_dim = config['state_dim']
     real_robot = config['real_robot']
@@ -164,12 +169,13 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
     # load policy and stats
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
-    policy = make_policy(policy_class, policy_config)
-    loading_status = policy.load_state_dict(torch.load(ckpt_path))
-    print(loading_status)
-    policy.cuda()
-    policy.eval()
-    print(f'Loaded: {ckpt_path}')
+    if inference_manager is None:
+        policy = make_policy(policy_class, policy_config)
+        loading_status = policy.load_state_dict(torch.load(ckpt_path))
+        print(loading_status)
+        policy.cuda()
+        policy.eval()
+        print(f'Loaded: {ckpt_path}')
     stats_path = os.path.join(ckpt_dir, f'dataset_stats.pkl')
     with open(stats_path, 'rb') as f:
         stats = pickle.load(f)
@@ -195,7 +201,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
     max_timesteps = int(max_timesteps * 1) # may increase for real-world tasks
 
-    num_rollouts = 50
+    num_rollouts = config.get('num_rollouts', 50)
     episode_returns = []
     highest_rewards = []
     for rollout_id in range(num_rollouts):
@@ -237,7 +243,10 @@ def eval_bc(config, ckpt_name, save_episode=True):
                     image_list.append(obs['images'])
                 else:
                     image_list.append({'main': obs['image']})
-                qpos_numpy = np.array(obs['qpos'])
+                qpos_numpy = annotate.input_tensors(
+                    'act_policy',
+                    {'joint_position': np.array(obs['qpos'])},
+                )
                 qpos = pre_process(qpos_numpy)
                 qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
                 qpos_history[:, t] = qpos
@@ -246,7 +255,28 @@ def eval_bc(config, ckpt_name, save_episode=True):
                 ### query policy
                 if config['policy_class'] == "ACT":
                     if t % query_frequency == 0:
-                        all_actions = policy(qpos, curr_image)
+                        if inference_manager is None:
+                            all_actions = policy(qpos, curr_image)
+                            action_chunk = post_process(
+                                all_actions.detach().cpu().numpy()
+                            )
+                            annotate.output_tensors(
+                                'act_policy',
+                                {'action_chunk': action_chunk},
+                                export_with='onnx',
+                            )
+                        else:
+                            outputs = inference_manager(
+                                {
+                                    'act_policy/pixels_top': torch.from_numpy(
+                                        obs['images']['top'].copy()
+                                    ),
+                                    'act_policy/joint_position': torch.from_numpy(
+                                        np.array(obs['qpos'])
+                                    ),
+                                }
+                            )
+                            all_actions = outputs['act_policy/action_chunk']
                     if temporal_agg:
                         all_time_actions[[t], t:t+num_queries] = all_actions
                         actions_for_curr_step = all_time_actions[:, t]
@@ -266,7 +296,11 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
                 ### post-process actions
                 raw_action = raw_action.squeeze(0).cpu().numpy()
-                action = post_process(raw_action)
+                action = (
+                    post_process(raw_action)
+                    if inference_manager is None
+                    else raw_action
+                )
                 target_qpos = action
 
                 ### step the environment
@@ -290,7 +324,8 @@ def eval_bc(config, ckpt_name, save_episode=True):
         print(f'Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward==env_max_reward}')
 
         if save_episode:
-            save_videos(image_list, DT, video_path=os.path.join(ckpt_dir, f'video{rollout_id}.mp4'))
+            video_prefix = config.get('video_prefix', 'video')
+            save_videos(image_list, DT, video_path=os.path.join(ckpt_dir, f'{video_prefix}{rollout_id}.mp4'))
 
     success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
     avg_return = np.mean(episode_returns)

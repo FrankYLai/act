@@ -7,6 +7,9 @@ data_local
 .vscode
 _wandb
 
+# LEAPP export experiment outputs and environment
+leapp_export/artifacts/
+
 **/.DS_Store
 
 fuse.cfg

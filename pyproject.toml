@@ -1,0 +1,29 @@
+[project]
+name = "act"
+version = "0.1.0"
+description = "Action Chunking with Transformers"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "einops==0.8.2",
+    "gym-aloha==0.1.1",
+    "h5py==3.14.0",
+    "huggingface-hub==1.32.0",
+    "imageio==2.38.0",
+    "ipython==9.6.0",
+    "leapp==0.7.2",
+    "matplotlib==3.10.6",
+    "numpy==2.2.6",
+    "opencv-python-headless==4.12.0.88",
+    "safetensors==0.8.0",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
